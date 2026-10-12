@@ -26,7 +26,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -56,23 +58,50 @@ def _outcome_of(page_id: str) -> str | None:
     return sel.get("name") if sel else None
 
 
+def _tracked_page_ids(conn) -> dict[str, dict[str, str]]:
+    """market_id -> {page_id, question}, from config/markets.yml rules ∪ notion_sync_state.
+
+    A rule's ``notion_page_id`` is known the moment it's added to config --
+    don't wait for the next ``notion_sync`` run (which only populates
+    ``notion_sync_state``) before a freshly-onboarded market's Notion page
+    is checkable. Falls back to notion_sync_state for rows synced before
+    they had an explicit notion_page_id in config.
+    """
+    rules = notion_sync.tracked_config()
+    rollup = notion_sync.build_rollup(conn)
+    out: dict[str, dict[str, str]] = {}
+    for row in rollup:
+        rule = notion_sync.match_tracked(row, rules)
+        if rule is None or not rule.get("notion_page_id"):
+            continue
+        out[row["market_id"]] = {
+            "page_id": rule["notion_page_id"],
+            "question": row.get("question") or "?",
+        }
+    state_rows = conn.execute(
+        "SELECT market_id, notion_page_id FROM notion_sync_state"
+    ).fetchall()
+    questions = {r["market_id"]: r["question"] for r in
+                 conn.execute("SELECT market_id, question FROM markets")}
+    for r in state_rows:
+        out.setdefault(r["market_id"], {
+            "page_id": r["notion_page_id"],
+            "question": questions.get(r["market_id"], "?"),
+        })
+    return out
+
+
 def check_outcome_changes() -> list[dict[str, str]]:
     """Diff each tracked page's current Actual Outcome against last-seen state."""
     db.init_db()
     changes: list[dict[str, str]] = []
     state = _load_state()
     with db.get_connection() as conn:
-        rows = conn.execute(
-            "SELECT market_id, notion_page_id FROM notion_sync_state"
-        ).fetchall()
-    # market_id -> question, for a readable message
-    with db.get_connection() as conn:
-        questions = {r["market_id"]: r["question"] for r in
-                     conn.execute("SELECT market_id, question FROM markets")}
+        tracked = _tracked_page_ids(conn)
 
     new_state = dict(state)
-    for row in rows:
-        market_id, page_id = row["market_id"], row["notion_page_id"]
+    for market_id, info in tracked.items():
+        page_id = info["page_id"]
         try:
             current = _outcome_of(page_id)
         except notion_sync.NotionError as exc:
@@ -84,12 +113,60 @@ def check_outcome_changes() -> list[dict[str, str]]:
         if previous is not None and previous != (current or ""):
             changes.append({
                 "market_id": market_id,
-                "question": questions.get(market_id, "?"),
+                "question": info["question"],
                 "from": previous or "(none)",
                 "to": current or "(none)",
             })
     _save_state(new_state)
     return changes
+
+
+def check_notion_forecast_due(horizon_hours: float = 48.0) -> list[dict[str, Any]]:
+    """Tracked pages whose own ``Forecast Due`` date (set by hand in Notion,
+    e.g. the data-release time -- which can fall *before* the market's formal
+    ``resolution_date``) is inside the horizon and ``My Independent Read`` is
+    still blank.
+
+    src.health.check_forecast_due deliberately checks a different thing: it
+    derives its deadline from markets.resolution_date (the tape's own close),
+    which is right for FOMC/election markets but wrong for data-release
+    markets (CPI, jobs) where Notion's Forecast Due is the actual release
+    time and is earlier than resolution_date. Checking only the DB-derived
+    date misses rows where this hand-set field is already past or imminent.
+    This function is the data-release-aware complement, not a replacement.
+    """
+    db.init_db()
+    due: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    with db.get_connection() as conn:
+        tracked = _tracked_page_ids(conn)
+
+    for market_id, info in tracked.items():
+        page_id = info["page_id"]
+        try:
+            page = notion_sync._call("GET", f"/pages/{page_id}")
+        except notion_sync.NotionError as exc:
+            print(f"  warn: could not read page {page_id} ({market_id[:12]}...): {exc}",
+                  file=sys.stderr)
+            continue
+        props = page.get("properties") or {}
+        fd_raw = ((props.get("Forecast Due") or {}).get("date") or {}).get("start")
+        read = (props.get("My Independent Read") or {}).get("number")
+        if not fd_raw or read is not None:
+            continue
+        fd_dt = datetime.fromisoformat(fd_raw.replace("Z", "+00:00"))
+        if fd_dt.tzinfo is None:
+            fd_dt = fd_dt.replace(tzinfo=timezone.utc)
+        hours_left = (fd_dt - now).total_seconds() / 3600.0
+        if hours_left > horizon_hours:
+            continue  # not yet inside the window -- still fine to be silent
+        due.append({
+            "market_id": market_id,
+            "question": info["question"],
+            "forecast_due": fd_raw,
+            "hours_left": round(hours_left, 1),
+        })
+    return due
 
 
 def _main() -> None:
@@ -114,6 +191,13 @@ def _main() -> None:
                 f"FORECAST DUE: {d['question'][:70]} resolves {d['resolution_date']} "
                 f"({d['hours_left']}h left)"
             )
+
+    notion_due = check_notion_forecast_due(horizon_hours=args.horizon_hours)
+    for d in notion_due:
+        out_lines.append(
+            f"FORECAST DUE (Notion): {d['question'][:70]} due {d['forecast_due']} "
+            f"({d['hours_left']}h left)"
+        )
 
     if out_lines:
         print("Polymarket Observation Log -- changes since last check:")

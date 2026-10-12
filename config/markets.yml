@@ -37,6 +37,26 @@ events:
       - outcome: "2.4%"
         notion_page_id: 3d7eea342aaf81ca9543f153f5664df3
 
+  - slug: core-cpi-mom-september-2026
+    category: Economic
+    name: Core CPI MoM — September 2026
+    description: Bracketed board on September core CPI month-over-month
+    resolution_date: 2026-10-14
+    active: true
+    track:
+      - outcome: "0.2%"
+        notion_page_id: 3dbeea342aaf810aaa08ed9cc88a7433
+
+  - slug: core-cpi-yoy-september-2026
+    category: Economic
+    name: Core CPI YoY — September 2026
+    description: Bracketed board on September core CPI year-over-year
+    resolution_date: 2026-10-14
+    active: true
+    track:
+      - outcome: "2.4%"
+        notion_page_id: 3dbeea342aaf81229c87d6d6d916f8af
+
   - slug: fed-decision-in-september-762
     category: Fed
     name: Fed Decision — September 2026
