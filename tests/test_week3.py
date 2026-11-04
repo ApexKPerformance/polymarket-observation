@@ -22,14 +22,14 @@ def conn(tmp_path, monkeypatch):
 # Track rules from config/markets.yml
 # --------------------------------------------------------------------------
 
-def test_seven_observation_markets_are_tracked_and_bound():
+def test_nine_observation_markets_are_tracked_and_bound():
     """Every active event must name a sub-market AND bind it to the row that
     already exists in the log, or the sync would duplicate the manual rows."""
     rules = notion_sync.tracked_config()
-    assert len(rules) == 7
+    assert len(rules) == 9
     assert all(r["notion_page_id"] for r in rules), \
         "a track rule without notion_page_id would create a second row"
-    assert len({r["notion_page_id"] for r in rules}) == 7, \
+    assert len({r["notion_page_id"] for r in rules}) == 9, \
         "two markets bound to the same Notion row"
 
 
